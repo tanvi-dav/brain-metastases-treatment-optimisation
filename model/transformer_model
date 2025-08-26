@@ -1,0 +1,102 @@
+import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
+import torch.nn as nn
+import os
+
+# ==== 1. Load patient sequence arrays ====
+
+# Get the base directory path
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+metadata_dir = os.path.join(base_dir, 'metadata')
+
+X_train = np.load(os.path.join(metadata_dir, 'X_train_seq.npz'))['X_train']  # [num_patients, max_seq_len, num_features]
+Y_train = np.load(os.path.join(metadata_dir, 'Y_train_seq.npz'))['Y_train']  # [num_patients, max_seq_len, num_outcomes]
+L_train = np.load(os.path.join(metadata_dir, 'L_train_seq.npz'))['L_train']  # [num_patients]
+
+input_dim = X_train.shape[2]     # num_features
+max_seq_len = X_train.shape[1]
+output_dim = Y_train.shape[2]    # num_outcomes
+
+print(f"Training data shapes: X {X_train.shape} Y {Y_train.shape} L {L_train.shape}")
+# Repeat for validation, test as needed
+
+# ==== 2. DataLoader ====
+
+class PatientSeqDataset(Dataset):
+    def __init__(self, X, Y, L):
+        self.X = X
+        self.Y = Y
+        self.L = L
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        return (
+            torch.tensor(self.X[idx], dtype=torch.float32),
+            torch.tensor(self.Y[idx], dtype=torch.float32),
+            torch.tensor(self.L[idx], dtype=torch.int64)
+        )
+
+train_ds = PatientSeqDataset(X_train, Y_train, L_train)
+train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
+
+# ==== 3. Transformer Model ====
+
+class PatientSeqTransformer(nn.Module):
+    def __init__(self, input_dim, model_dim, n_heads, num_layers, output_dim, max_seq_len=3225, dropout=0.1):
+        super().__init__()
+        self.input_fc = nn.Linear(input_dim, model_dim)
+        self.pos_embed = nn.Parameter(torch.randn(1, max_seq_len, model_dim))        # [1, max_seq_len, model_dim]
+        encoder_layer = nn.TransformerEncoderLayer(d_model=model_dim, nhead=n_heads, batch_first=True, dropout=dropout)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.out_fc = nn.Linear(model_dim, output_dim)
+
+    def forward(self, x, lengths):
+        batch_size, seq_len, _ = x.shape
+        pos_emb = self.pos_embed[:, :seq_len, :]
+        x_proj = self.input_fc(x) + pos_emb
+
+        # Build attention mask: True if step >= length (i.e., is padding)
+        mask = torch.arange(seq_len)[None, :] >= lengths[:, None]
+        y_enc = self.transformer(x_proj, src_key_padding_mask=mask)
+        out = self.out_fc(y_enc)
+        return out, mask
+
+# Setup model parameters
+model_dim = 128
+n_heads = 8
+num_layers = 2
+
+model = PatientSeqTransformer(input_dim, model_dim, n_heads, num_layers, output_dim, max_seq_len)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+# ==== 4. Masked Loss Function ====
+
+def masked_mse_loss(y_pred, y_true, mask):
+    valid = ~mask    # [batch, seq_len]
+    loss = ((y_pred - y_true) ** 2) * valid.unsqueeze(-1)
+    loss_sum = loss.sum()
+    denom = valid.sum() * y_true.shape[-1]
+    return loss_sum / denom
+
+# ==== 5. Training Loop ====
+
+epochs = 5
+for epoch in range(epochs):
+    model.train()
+    total_loss = 0.0
+    total_steps = 0
+    for X, Y, L in train_loader:
+        # All tensors are already on CPU
+        y_hat, mask = model(X, L)
+        loss = masked_mse_loss(y_hat, Y, mask)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item() * X.shape[0]
+        total_steps += X.shape[0]
+    print(f"Epoch {epoch+1}/{epochs}: Train Loss {total_loss/total_steps:.4f}")
+
+print("✅ CPU-only Transformer sequence modeling complete!")
