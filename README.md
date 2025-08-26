@@ -42,11 +42,11 @@ python model/transformer_model
 ```
 
 ## Data
-Due to privacy and size constraints, the clinical data and imaging files are not included in this repository. Please contact the authors for access to the dataset.
+Uploaded
 
 ## Authors
-- [Your Name]
-- [Co-author Name]
+- Vinodhini Jayaseelen  
+- Tanvi Davuluri
 
 ## License
 This project is private and confidential for NeurIPS 2025 submission.
